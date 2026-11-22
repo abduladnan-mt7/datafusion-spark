@@ -8,12 +8,189 @@
 # For more information, please see:
 #   https://github.com/apache/datafusion/issues/15914
 
-## Original Query: SELECT timestamp_seconds(1230219000);
-## PySpark 3.5.5 Result: {'timestamp_seconds(1230219000)': datetime.datetime(2008, 12, 25, 7, 30), 'typeof(timestamp_seconds(1230219000))': 'timestamp', 'typeof(1230219000)': 'int'}
-#query
-#SELECT timestamp_seconds(1230219000::int);
+# Expected results verified against Apache Spark 4.2.0.
 
-## Original Query: SELECT timestamp_seconds(1230219000.123);
-## PySpark 3.5.5 Result: {'timestamp_seconds(1230219000.123)': datetime.datetime(2008, 12, 25, 7, 30, 0, 123000), 'typeof(timestamp_seconds(1230219000.123))': 'timestamp', 'typeof(1230219000.123)': 'decimal(13,3)'}
-#query
-#SELECT timestamp_seconds(1230219000.123::decimal(13,3));
+# Seconds are measured from the UTC epoch, including negative values.
+query PPP
+SELECT timestamp_seconds(1230219000::INT) AS pos, timestamp_seconds(-1230219000::INT) AS neg,
+  timestamp_seconds(0::BIGINT) AS zero;
+----
+2008-12-25T15:30:00Z 1931-01-07T08:30:00Z 1970-01-01T00:00:00Z
+
+# All Spark integer types are accepted.
+query PPPP
+SELECT timestamp_seconds(1::TINYINT) AS i8, timestamp_seconds(1::SMALLINT) AS i16,
+  timestamp_seconds(1::INT) AS i32, timestamp_seconds(1::BIGINT) AS i64;
+----
+1970-01-01T00:00:01Z 1970-01-01T00:00:01Z 1970-01-01T00:00:01Z 1970-01-01T00:00:01Z
+
+query PP
+SELECT timestamp_seconds(NULL) AS untyped_null, timestamp_seconds(NULL::BIGINT) AS typed_null;
+----
+NULL NULL
+
+# Column input exercises physical execution.
+query PI
+SELECT timestamp_seconds(x) AS ts, unix_seconds(timestamp_seconds(x)) AS secs
+FROM (VALUES (-1::BIGINT), (0::BIGINT), (1::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+1969-12-31T23:59:59Z -1
+1970-01-01T00:00:00Z 0
+1970-01-01T00:00:01Z 1
+NULL NULL
+
+query I
+SELECT unix_seconds(timestamp_seconds(arrow_cast(x, 'Dictionary(Int32, Int64)')))
+FROM (VALUES (-1::BIGINT), (1::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+-1
+1
+NULL
+
+# Integral input is multiplied exactly; the edges of the microsecond range are valid.
+query II
+SELECT unix_micros(timestamp_seconds(9223372036854::BIGINT)) AS max_secs,
+  unix_micros(timestamp_seconds(-9223372036854::BIGINT)) AS min_secs;
+----
+9223372036854000000 -9223372036854000000
+
+# One second past either edge overflows, with or without ANSI mode.
+query error Compute error: long overflow
+SELECT timestamp_seconds(9223372036855::BIGINT);
+
+query error Compute error: long overflow
+SELECT timestamp_seconds(-9223372036855::BIGINT);
+
+query error Compute error: long overflow
+SELECT timestamp_seconds(1230219000123123::BIGINT);
+
+# Decimal input keeps fractional seconds to the microsecond.
+query PPPP
+SELECT timestamp_seconds('1230219000.123'::DECIMAL(13, 3)) AS a, timestamp_seconds('1.23'::DECIMAL(3, 2)) AS b,
+  timestamp_seconds('-1.5'::DECIMAL(2, 1)) AS c, timestamp_seconds('0.1234560'::DECIMAL(8, 7)) AS d;
+----
+2008-12-25T15:30:00.123Z 1970-01-01T00:00:01.230Z 1969-12-31T23:59:58.500Z 1970-01-01T00:00:00.123456Z
+
+query I
+SELECT unix_micros(timestamp_seconds('9223372036854'::DECIMAL(38, 0)));
+----
+9223372036854000000
+
+query P
+SELECT timestamp_seconds(arrow_cast(x, 'Dictionary(Int32, Decimal128(13, 3))'))
+FROM (VALUES ('1230219000.123'::DECIMAL(13, 3)), (NULL::DECIMAL(13, 3))) AS t(x);
+----
+2008-12-25T15:30:00.123Z
+NULL
+
+# More than six fractional digits cannot be converted exactly.
+query error Compute error: Rounding necessary
+SELECT timestamp_seconds('0.1234567'::DECIMAL(7, 7));
+
+query error Compute error: Rounding necessary
+SELECT timestamp_seconds('0.00000000000000000000000000000000000001'::DECIMAL(38, 38));
+
+# Decimal values outside the microsecond range overflow.
+query error Compute error: Overflow
+SELECT timestamp_seconds('9223372036855'::DECIMAL(38, 0));
+
+query error Compute error: Overflow
+SELECT timestamp_seconds('99999999999999999999999999999999999999'::DECIMAL(38, 0));
+
+query error Compute error: Overflow
+SELECT timestamp_seconds('12345678901234567890.5'::DECIMAL(38, 1));
+
+# FLOAT and DOUBLE input truncates toward zero to whole microseconds. FLOAT is
+# widened to DOUBLE first, keeping its rounding error.
+query PPPP
+SELECT timestamp_seconds(1.23::DOUBLE) AS a, timestamp_seconds(1.23::FLOAT) AS b,
+  timestamp_seconds(0.1234567::DOUBLE) AS c, timestamp_seconds(0.1234567::FLOAT) AS d;
+----
+1970-01-01T00:00:01.230Z 1970-01-01T00:00:01.230Z 1970-01-01T00:00:00.123456Z 1970-01-01T00:00:00.123456Z
+
+query IIII
+SELECT unix_micros(timestamp_seconds(-0.0000015::DOUBLE)) AS a, unix_micros(timestamp_seconds(1e300::DOUBLE)) AS b,
+  unix_micros(timestamp_seconds(-1e300::DOUBLE)) AS c, unix_micros(timestamp_seconds(-0.0::DOUBLE)) AS d;
+----
+-1 9223372036854775807 -9223372036854775808 0
+
+# NaN and infinities return NULL.
+query PPPPPP
+SELECT timestamp_seconds('NaN'::DOUBLE) AS a, timestamp_seconds('Infinity'::DOUBLE) AS b,
+  timestamp_seconds('-Infinity'::DOUBLE) AS c, timestamp_seconds('NaN'::FLOAT) AS d,
+  timestamp_seconds('Infinity'::FLOAT) AS e, timestamp_seconds('-Infinity'::FLOAT) AS f;
+----
+NULL NULL NULL NULL NULL NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(x))
+FROM (VALUES (1.5::DOUBLE), ('NaN'::DOUBLE), (NULL::DOUBLE)) AS t(x);
+----
+1500000
+NULL
+NULL
+
+# ExpectsInputTypes rejects non-numeric arguments rather than casting them.
+query error The first parameter of `timestamp_seconds` requires the "NUMERIC" type, however it has the type "STRING".
+SELECT timestamp_seconds('1');
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(true);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds('2020-01-01 00:00:00'::TIMESTAMP);
+
+# ANSI mode changes neither the accepted types nor the overflow and rounding errors.
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query error Compute error: long overflow
+SELECT timestamp_seconds(1230219000123123::BIGINT);
+
+query error Compute error: Rounding necessary
+SELECT timestamp_seconds('0.1234567'::DECIMAL(7, 7));
+
+query P
+SELECT timestamp_seconds('NaN'::DOUBLE);
+----
+NULL
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+# Session time zone affects display, not the stored epoch count, including
+# across the spring daylight saving transition.
+statement ok
+SET datafusion.execution.time_zone = 'America/Los_Angeles';
+
+query PPI
+SELECT timestamp_seconds(1552212000::BIGINT) AS after_dst, timestamp_seconds(1552208400::BIGINT) AS before_dst,
+  unix_seconds(timestamp_seconds(1552212000::BIGINT)) AS secs;
+----
+2019-03-10T03:00:00-07:00 2019-03-10T01:00:00-08:00 1552212000
+
+query PP
+SELECT timestamp_seconds(1230219000::INT) AS pos, timestamp_seconds(-1230219000::INT) AS neg;
+----
+2008-12-25T07:30:00-08:00 1931-01-07T00:30:00-08:00
+
+statement ok
+SET datafusion.execution.time_zone = 'UTC';
+
+# Check the Arrow return type without relying on Spark's type display.
+query T
+SELECT arrow_typeof(timestamp_seconds(0::BIGINT));
+----
+Timestamp(µs, "UTC")
+
+# Arrow unsigned types through UInt32 are accepted; UInt64 is rejected because
+# Spark has no type for it.
+query III
+SELECT unix_seconds(timestamp_seconds(arrow_cast(255, 'UInt8'))) AS u8,
+  unix_seconds(timestamp_seconds(arrow_cast(65535, 'UInt16'))) AS u16,
+  unix_seconds(timestamp_seconds(arrow_cast(4294967295, 'UInt32'))) AS u32;
+----
+255 65535 4294967295
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(arrow_cast(1, 'UInt64'));

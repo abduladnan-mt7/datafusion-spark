@@ -39,6 +39,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [second](#second)
 - [time_trunc](#time_trunc)
 - [timestamp_micros](#timestamp_micros)
+- [timestamp_seconds](#timestamp_seconds)
 - [to_utc_timestamp](#to_utc_timestamp)
 - [trunc](#trunc)
 - [unix_date](#unix_date)
@@ -622,6 +623,29 @@ timestamp_micros(microseconds)
 > SELECT timestamp_micros(-1::BIGINT);
 1969-12-31T23:59:59.999999Z
 > SELECT timestamp_micros(NULL);
+NULL
+```
+
+## `timestamp_seconds`
+
+Returns the timestamp that is `seconds` seconds after 1970-01-01 00:00:00 UTC. Negative values precede the epoch. Fractional seconds are kept to microsecond precision. Integer input that overflows the microsecond count is an error. Decimal input must convert to a whole number of microseconds exactly: more than six fractional digits or an out-of-range value is an error. FLOAT and DOUBLE input is truncated toward zero to whole microseconds and saturates at the BIGINT range; NaN and infinities return NULL. The result has the session time zone (`datafusion.execution.time_zone`, default UTC), which affects display, not the stored microsecond count. Returns NULL for NULL input.
+
+```sql
+timestamp_seconds(seconds)
+```
+
+### Arguments
+
+- **seconds**: Numeric count of seconds since the UTC epoch: TINYINT, SMALLINT, INT, BIGINT, DECIMAL, FLOAT or DOUBLE. Arrow UInt8, UInt16 and UInt32 inputs are also accepted. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT timestamp_seconds(1230219000);
+2008-12-25T15:30:00Z
+> SELECT timestamp_seconds(1230219000.123);
+2008-12-25T15:30:00.123Z
+> SELECT timestamp_seconds(NULL);
 NULL
 ```
 
